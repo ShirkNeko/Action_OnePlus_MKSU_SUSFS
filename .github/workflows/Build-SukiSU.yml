@@ -128,6 +128,9 @@ jobs:
           cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch ./common/
           cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+          cp -r ../SukiSU_patch/other/lz4k/include/linux/* ./common/include/linux
+          cp -r ../SukiSU_patch/other/lz4k/lib/* ./common/lib
+          cp -r ../SukiSU_patch/other/lz4k/crypto/* ./common/crypto
           
           echo "正在给内核打susfs补丁"
           cd ./common
@@ -181,6 +184,16 @@ jobs:
           echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
+
+          if ! grep -q '^CONFIG_ZRAM=m' ./common/arch/arm64/configs/gki_defconfig; then
+          echo "CONFIG_ZRAM=y" >> ./common/arch/arm64/configs/gki_defconfig
+          perl -pi -e 's/static const char \*default_compressor = "lzo-rle";/static const char \*default_compressor = CONFIG_ZRAM_DEF_COMP;/g' ./common/drivers/block/zram/zram_drv.c
+          fi
+          
+          echo "obj-y += lz4k/" >> ./common/lib/Makefile
+          echo "obj-y += lz4kd/" >> ./common/lib/Makefile
+          echo "obj-y += lz4k.o" >> ./common/crypto/Makefile
+          echo "obj-y += lz4kd.o" >> ./common/crypto/Makefile
 
           # Remove check_defconfig
           sed -i 's/check_defconfig//' ./common/build.config.gki
