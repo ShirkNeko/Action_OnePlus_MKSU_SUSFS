@@ -103,7 +103,7 @@ jobs:
           if [[ "${{ github.event.inputs.kernelsu_version }}" == "tag" ]]; then
             echo "BRANCH=-" >> $GITHUB_ENV
           elif [[ "${{ github.event.inputs.kernelsu_version }}" == "main" ]]; then
-            echo "BRANCH=-s susfs-dev" >> $GITHUB_ENV
+            echo "BRANCH=-s susfs-stable" >> $GITHUB_ENV
           fi
           
       - name: Add KernelSU-SukiSU
