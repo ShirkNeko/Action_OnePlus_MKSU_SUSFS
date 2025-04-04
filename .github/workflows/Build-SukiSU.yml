@@ -5,27 +5,27 @@ on:
       CPU:
         description: "分支"
         required: true
-        default: 'sm8550'
+        default: 'sm8475'
       FEIL:
         description: "配置文件"
         required: true
-        default: 'oneplus_ace2pro_v'
+        default: 'oneplus_ace2_v'
       CPUD:
         description: "处理器代号"
         required: true
-        default: 'kalama'
+        default: 'waipio'
       ANDROID_VERSION:
         description: "内核安卓版本"
         required: true
-        default: 'android13'
+        default: 'android12'
       KERNEL_VERSION:
         description: "内核版本"
         required: true
-        default: '5.15'
+        default: '5.10'
       KERNEL_NAME:
         description: "修改内核名称"
         required: true
-        default: '--android13-8-0-01123-996545487552b-Lzbs-ll'
+        default: '5.10.209-android12-9-o-g0a04ff961c85'
       kernelsu_variant:
         description: "选择 KSU"
         required: true
@@ -222,8 +222,7 @@ jobs:
         run: |
          cd kernel_workspace/kernel_platform
          sed -i '$s|echo "\$res"|echo "\${{ github.event.inputs.KERNEL_NAME }}"|' ./common/scripts/setlocalversion
-         sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
-  
+         
       - name: Build kernel
         if: github.event.inputs.CPU == 'sm8650' 
         run: |
@@ -240,8 +239,8 @@ jobs:
         run: |
          git clone https://github.com/Kernel-SU/AnyKernel3 --depth=1
          rm -rf ./AnyKernel3/.git
-         cp kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image ./AnyKernel3/
-         cp kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/Image ./kernel_workspace/kernel
+         cp kernel_workspace/kernel_platform/out/msm-kernel-waipio-waipio-gki/dist/Image ./AnyKernel3/
+         cp kernel_workspace/kernel_platform/out/msm-kernel-waipio-waipio-gki/dist/Image ./kernel_workspace/kernel
          
       - name: Upload AnyKernel3
         uses: actions/upload-artifact@v4
