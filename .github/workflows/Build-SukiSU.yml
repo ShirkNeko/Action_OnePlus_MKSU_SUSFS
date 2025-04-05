@@ -49,7 +49,7 @@ on:
         type: boolean
         default: true
       VFS_patch_ENABLED:
-        description: "添加vfs补丁（新钩子）？"
+        description: "添加 vfs 补丁（新钩子）？"
         required: true
         type: choice
         options:
