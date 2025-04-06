@@ -1,67 +1,67 @@
-name: Build OnePlus_Kernel
-on:
-  workflow_dispatch:
-    inputs:
-      CPU:
-        description: "分支"
-        required: true
-        default: 'sm8650'
-      FEIL:
-        description: "配置文件"
-        required: true
-        default: 'oneplus_ace3_pro_v'
-      CPUD:
-        description: "处理器代号"
-        required: true
-        default: 'pineapple'
-      ANDROID_VERSION:
-        description: "内核安卓版本"
-        required: true
-        default: 'android14'
-      KERNEL_VERSION:
-        description: "内核版本"
-        required: true
-        default: '6.1'
-      KERNEL_NAME:
-        description: "修改内核名称"
-        required: true
-        default: '-android14-11-o-g1132d864665d'
-      kernelsu_variant:
-        description: "选择 KSU"
-        required: true
-        type: choice
-        options:
-          - Kernel
-          - SukiSU
-        default: SukiSU
-      kernelsu_version:
-        description: "选择 KSU 版本"
-        required: true
-        type: choice
-        options:
-          - without ksu
-          - tag
-          - main
-        default: main
-      SUSFS_ENABLED:
-        description: "添加 SUSFS"
-        required: true
-        type: boolean
-        default: true
-      VFS_patch_ENABLED:
-        description: "添加 vfs 补丁（新钩子）？"
-        required: true
-        type: choice
-        options:
-          - enable
-          - disable
-        default: enable
-jobs:
-  build:
-    runs-on: ubuntu-latest
+姓名:构建OnePlus_Kernel
+在……之上:
+workflow_dispatch:
+输入:
+中央处理器:
+描述:"分支"
+必需的:正确
+默认:'sm8650'
+Feil:
+描述:"配置文件"
+必需的:正确
+默认:'oneplus_ACE3_pro_v'
+CPUD:
+描述:"处理器代号"
+必需的:正确
+默认:'菠萝'
+Android_VERSION:
+描述:"内核安卓版本"
+必需的:正确
+默认:'android14'
+kernel_VERSION:
+描述:"内核版本"
+必需的:正确
+默认:'6.1'
+kernel_NAME:
+描述:"修改内核名称"
+必需的:正确
+默认:'-android14-11-o-g1132d864665d'
+kernelsu_variant:
+描述:"选择KSU"
+必需的:正确
+类型:选择
+选项:
+-内核
+-SukiSu
+默认:SukiSu
+kernelsu_version:
+描述:"选择KSU版本"
+必需的:正确
+类型:选择
+选项:
+-无ksu
+-标签
+-主要的
+默认:主要的
+SUSFS_ENABLED:
+描述:"添加SUSFS"
+必需的:正确
+类型:布尔型
+默认:正确
+VFS_patch_ENABLED:
+描述:"添加vfs补丁(新钩子)？"
+必需的:正确
+类型:选择
+选项:
+-使能够
+-禁用
+默认:使能够
+工作:
+建立:
+run-on:ubuntu-最新
 
-    steps:
-      - name: Maximize build space
+步骤:
+-姓名:最大化构建空间
 uses:easimon/maximize-build-space@master
 和……一起:
 根储备-mb:8192
