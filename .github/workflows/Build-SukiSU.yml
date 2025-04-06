@@ -62,121 +62,121 @@ jobs:
 
     steps:
       - name: Maximize build space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 8192
-          temp-reserve-mb: 2048
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
+uses:easimon/maximize-build-space@master
+和……一起:
+根储备-mb:8192
+temp-reserve-mb:2048
+remove-dotnet:'true'
+移除-android:'true'
+去除-haskell:'true'
+remove-codeql:'true'
 
-      - name: Configure Git
-        run: |
-         git config --global user.name "ychenxuan"
-         git config --global user.email "3494167979@qq.com"
+-姓名:配置Git
+跑:|
+git配置--global user.name"ychenxuan"
+git配置-全局用户.电子邮件"3494167979@qq.com"
 
-      - name: Install dependencies
-        run: |
-         sudo apt update && sudo apt upgrade -y
-         sudo apt install -y python3 git curl
+-姓名:安装相依性
+跑:|
+sudo apt更新&&sudo apt升级-y
+sudo apt install-y python3git curl
 
-      - name: Install repo tool
-        run: |
-         curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
-         chmod a+x ~/repo
-         sudo mv ~/repo /usr/local/bin/repo
+-姓名:安装回购工具
+跑:|
+卷曲https://storage.googleapis.com/git-repo-downloads/repo>~/repo
+chmod a+x~/repo
+sudo mv~/repo/usr/local/bin/repo
 
-      - name: Initialize repo and sync
-        run: |
-         mkdir kernel_workspace && cd kernel_workspace
-         repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ github.event.inputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
-         repo sync
-         rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
-         rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
-         sed -i 's/ -dirty//g' kernel_platform/common/scripts/setlocalversion
-         sed -i 's/ -dirty//g' kernel_platform/msm-kernel/scripts/setlocalversion
+-姓名:初始化回购并同步
+跑:|
+mkdir kernel_workspace&&cd kernel_workspace
+回购初始-u https://github.com/OnePlusOSS/kernel_manifest.git-b参考/机头/oneplus/${{github.event.inputs.CPU}}-m${{github.event.inputs.FEIL}}.xml--深度=1
+回购同步
+RM kernel_platform/common/android/abi_gki_protected_exports_*||echo“没有受保护的出口！”
+RM kernel_platform/msm-kernel/android/abi_gki_protected_exports_*||echo“没有受保护的出口！”
+SED-i'S/-dirty//g'kernel_platform/common/scripts/setlocalversion
+SED-i'S/-dirty//g'kernel_platform/msm-kernel/scripts/setlocalversion
       
-      - name: KernelSU & SukiSU version
-        if: ${{ github.event.inputs.kernelsu_variant == 'Official' || github.event.inputs.kernelsu_variant == 'SukiSU' }}
-        run: |
-          if [[ "${{ github.event.inputs.kernelsu_version }}" == "tag" ]]; then
-            echo "BRANCH=-" >> $GITHUB_ENV
-          elif [[ "${{ github.event.inputs.kernelsu_version }}" == "main" ]]; then
-            echo "BRANCH=-s susfs-stable" >> $GITHUB_ENV
-          fi
+-姓名：KernelSU和SukiSu版本
+如果:${{github.event.inputs.kernelsu_variant=='官方'||github.event.inputs.kernelsu_variant=='SukiSU' }}
+跑:|
+如果[["${{github.event.inputs.kernelsu_version}}"=="标签"]]；则
+回声"分支=-">>$GITHUB_ENV
+Elif[["${{github.event.inputs.kernelsu_version}}"=="主要"]]；然后
+回声"分支=-s susfs-stable">>$GITHUB_ENV
+Fi
           
-      - name: Add KernelSU-SukiSU
-        if: ${{ github.event.inputs.kernelsu_variant == 'SukiSU' }}
-        run: |
-          cd kernel_workspace/kernel_platform
-          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/KernelSU/main/kernel/setup.sh" | bash ${{ env.BRANCH }}
-          cd ./KernelSU
-          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 12606)
-          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-          #sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+-姓名：添加KernelSu-SukiSu
+如果:${{github.event.inputs.kernelsu_variant=='SukiSU' }}
+跑:|
+CD kernel_workspace/kernel_platform
+curl-LSs"https://raw.githubusercontent.com/ShirkNeko/KernelSU/main/kernel/setup.sh"|bash${{env.branch}}
+CD./KernelSU
+#KSU_VERSION=$(expr$(/usr/bin/git修订列表--主要计数)"+"12606)
+#echo"KSUVER=$KSU_VERSION">>$GITHUB_ENV
+#sed-i"s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/"内核/Makefile
           
-      - name: Apply SUSFS Patches SukiSU
-        if: ${{ (inputs.kernelsu_variant == 'SukiSU') && github.event.inputs.SUSFS_ENABLED == 'true' }}
-        run: |
-          cd kernel_workspace
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}
-          git clone https://github.com/ShirkNeko/SukiSU_patch.git
-          cd kernel_platform
+-姓名：应用SUSFS修补程序SukiSU
+如果:${{(inputs.kernelsu_variant=='SukiSU')&&github.event.inputs.SUSFS_ENABLED=='true' }}
+跑:|
+CD kernel_workspace
+git克隆https://gitlab.com/simonpunk/susfs4ksu.git-b gki-${{github.event.inputs.ANDROID_VERSION}}-${{github.event.inputs.KERNEL_VERSION}}
+吉特克隆https://github.com/ShirkNeko/SukiSU_patch.git
+CD kernel_platform
 
-          # Copy SUSFS patches
-          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch ./common/
-          cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
-          cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
-          # zram lz4kd
-          #cp -r ../SukiSU_patch/other/lz4k/include/linux/* ./common/include/linux
-          #cp -r ../SukiSU_patch/other/lz4k/lib/* ./common/lib
-          #cp -r ../SukiSU_patch/other/lz4k/crypto/* ./common/crypto
+#复制SUSFS修补程序
+CP.。/susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{github.event.inputs.ANDROID_VERSION}}-${{github.event.inputs.KERNEL_VERSION}}.patch./common/
+CP.。/susfs4ksu/kernel_patches/fs/*./common/fs/
+CP.。/susfs4ksu/kernel_patches/include/linux/*./common/include/linux/
+#zram lz4kd
+#cp-r.。/SukiSU_patch/other/lz4k/include/linux/*./common/include/linux
+#cp-r.。/SukiSU_patch/other/lz4k/lib/*./common/lib
+#cp-r.。/SukiSU_patch/other/lz4k/crypto/*./common/crypto
           
-          echo "正在给内核打susfs补丁"
-          cd ./common
-          patch -p1 < 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch || true
-          echo "完成"
+回声"正在给内核打usfs补丁"
+CD./common
+修补程序-p1<50_add_susfs_in_gki-${{github.event.inputs.ANDROID_VERSION}}-${{github.event.inputs.KERNEL_VERSION}}.patch||true
+回显"完成"
           
-      - name: Apply Hide Stuff Patches
-        if: ${{ github.event.inputs.SUSFS_ENABLED == 'true' }}
-        run: |
-          cd kernel_workspace/kernel_platform/common
-          cp ../../SukiSU_patch/69_hide_stuff.patch ./
-          echo "正在打隐藏应用补丁"
-          patch -p1 -F 3 < 69_hide_stuff.patch
+-姓名:应用隐藏材料修补程序
+如果:${{github.event.inputs.SUSFS_ENABLED=='true' }}
+跑:|
+CD kernel_workspace/kernel_platform/common
+CP../../SukiSU_patch/69_hide_stuff.patch./
+回显"正在打隐藏应用补丁"
+patch-p1-F3<69_hide_stuff.patch
          
-      - name: Apply New Hooks Patches
-        if: ${{ github.event.inputs.VFS_patch_ENABLED == 'enable' }}
-        run: |
-          cd kernel_workspace/kernel_platform/common
-          cp ../../SukiSU_patch/hooks/new_hooks.patch ./
-          echo "正在打vfs补丁"
-          patch -p1 -F 3 < new_hooks.patch
-          echo "完成"
+-姓名:应用新挂钩修补程序
+如果:${{github.event.inputs.VFS_patch_ENABLED=='启用' }}
+跑:|
+CD kernel_workspace/kernel_platform/common
+CP../../SukiSU_patch/hooks/new_hooks.patch./
+回声"正在打vfs补丁"
+patch-p1-F3<new_hooks.patch
+回显"完成"
 
-          #if [ "${{ github.event.inputs.KERNEL_VERSION }}" != "5.10" ]; then
-          #  cp ../../SukiSU_patch/other/lz4k_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch ./
-          #  patch -p1 -F 3 < lz4kd.patch || true
-          #fi
+#if["${{github.event.inputs.KERNEL_VERSION}}"！="5.10"]；则
+#cp../../SukiSU_patch/other/lz4k_patch/${{github.event.inputs.KERNEL_VERSION}/lz4kd.patch./
+#patch-p1-F3<lz4kd.patch||true
+#fi
 
-      - name: Add SUSFS Configuration Settings
-        run: |
-          cd kernel_workspace/kernel_platform
-          # Add KSU configuration settings
-          echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
+-姓名:添加SUSFS配置设置
+跑:|
+CD kernel_workspace/kernel_platform
+#添加KSU配置设置
+echo"CONFIG_KSU=y">>./common/arch/arm64/configs/gki_defconfig
 
-          # Add VFS configuration settings
-          if [[ "${{ github.event.inputs.VFS_patch_ENABLED }}" == 'enable' ]]; then
-            echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_MANUAL_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
-          else
-            echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> ./common/arch/arm64/configs/gki_defconfig
-          fi
+#添加VFS配置设置
+如果[["${{github.event.inputs.VFS_patch_ENABLED}}"=='enable']]；则
+echo"CONFIG_KSU_SUSFS_SUS_SU=n">>./common/arch/arm64/configs/gki_defconfig
+echo"CONFIG_KSU_MANUAL_HOOK=y">>./common/arch/arm64/configs/gki_defconfig
+其他
+echo"CONFIG_KSU_SUSFS_SUS_SU=y">>./common/arch/arm64/configs/gki_defconfig
+Fi
           
-          # Add SUSFS configuration settings
-          echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+#添加SUSFS配置设置
+echo"CONFIG_KSU_SUSFS=y">>./common/arch/arm64/configs/gki_defconfig
+echo"CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y">>./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
