@@ -234,38 +234,6 @@ jobs:
           else
             LTO=thin ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} gki
           fi
-
-      - name: Patch kernel Image with KPM
-        if: ${{ success() }}
-        run: |
-         echo "🔍 正在查找 Image 文件路径..."
-         IMAGE_PATH=$(find kernel_workspace/kernel_platform -type f -name "Image" | head -n 1)
-
-         if [ -f "$IMAGE_PATH" ]; then
-         IMAGE_DIR=$(dirname "$IMAGE_PATH")
-         echo "🎯 找到 Image: $IMAGE_PATH"
-         cd "$IMAGE_DIR"
-         curl -LO https://github.com/ShirkNeko/SukiSU_KernelPatch_patch/releases/download/0.11-beta/patch_linux
-         chmod +x patch_linux
-         echo "🚀 开始执行 KPM 补丁器..."
-         ./patch_linux || echo "⚠️ KPM 补丁执行失败，跳过"
-         else
-         echo "❌ 未找到 Image 文件，跳过 KPM 补丁"
-         fi
-
-      - name: Replace Image with oImage
-        if: ${{ success() }}
-        run: |
-         echo "📦 正在替换 Image 为补丁后的 oImage..."
-         IMAGE_PATH=$(find kernel_workspace/kernel_platform -type f -name "oImage" | head -n 1)
-
-         if [ -f "$IMAGE_PATH" ]; then
-         cp -f "$IMAGE_PATH" "$(dirname "$IMAGE_PATH")/Image"
-         echo "✅ 替换成功：oImage → Image"
-         else
-         echo "⚠️ 没找到 oImage，跳过替换"
-         fi
-
          
       - name: Make AnyKernel3
         run: |
@@ -304,7 +272,17 @@ jobs:
               fi
             fi
           fi
-         
+
+      - name: Apply patch_linux and replace Image
+        run: |
+          cd kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist
+          curl -LO https://github.com/ShirkNeko/SukiSU_KernelPatch_patch/releases/download/0.11-beta/patch_linux
+          chmod +x patch_linux
+          ./patch_linux
+          rm -f Image
+          mv oImage Image
+          cp Image $GITHUB_WORKSPACE/AnyKernel3/Image
+          cp Image $GITHUB_WORKSPACE/kernel_workspace/kernel
          
       - name: Upload AnyKernel3
         uses: actions/upload-artifact@v4
