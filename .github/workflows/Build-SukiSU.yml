@@ -13,7 +13,7 @@ on:
       CPUD:
         description: "处理器代号"
         required: true
-        default: 'SUN'
+        default: 'sun'
       ANDROID_VERSION:
         description: "内核安卓版本"
         required: true
