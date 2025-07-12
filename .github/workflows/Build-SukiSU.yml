@@ -58,7 +58,7 @@ on:
         type: choice
         description: "内核安卓版本"
         required: true
-        default: android13
+        default: android15
         options:
           - android12
           - android13
