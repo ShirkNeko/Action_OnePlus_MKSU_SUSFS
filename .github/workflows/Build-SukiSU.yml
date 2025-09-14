@@ -102,6 +102,11 @@ on:
         description: "是否启用添加更多的ZRAM算法？"
         required: true
         default: false
+      SUKISU_SUSFS_TEST:
+        type: boolean
+        description: "是否使用SukiSU susfs-test分支进行编译？"
+        required: true
+        default: false
 
 jobs:
   build:
@@ -174,7 +179,19 @@ jobs:
           git commit -m "Force remove -dirty suffix from kernel version"
 
       # 添加 SukiSU Ultra
+      - name: Add KernelSU-SukiSU Ultra(susfs-test)
+        if: ${{ github.event.inputs.SUKISU_SUSFS_TEST == 'true' }}
+        run: |
+          cd kernel_workspace/kernel_platform
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-test
+          cd ./KernelSU
+          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10606)
+          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          export KSU_VERSION=$KSU_VERSION
+          sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+
       - name: Add KernelSU-SukiSU Ultra
+        if: ${{ github.event.inputs.SUKISU_SUSFS_TEST == 'false' }}
         run: |
           cd kernel_workspace/kernel_platform
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
