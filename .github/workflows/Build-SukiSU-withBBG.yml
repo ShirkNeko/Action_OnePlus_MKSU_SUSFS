@@ -340,7 +340,7 @@ jobs:
           wget https://raw.githubusercontent.com/Alhugh233/Action_OnePlus_MKSU_SUSFS/refs/heads/main/BBG.patch
           mv BBG.patch common/security
           cd common/security
-          patch "Kconfig" < BBG.patch
+          patch -i BBG.patch Kconfig
           cd ../..
           echo "CONFIG_BBG=y" >> "$CONFIG_FILE"
 
