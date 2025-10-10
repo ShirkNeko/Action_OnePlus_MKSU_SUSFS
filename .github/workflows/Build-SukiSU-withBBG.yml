@@ -335,11 +335,11 @@ jobs:
 
       - name: Add BaseBand-Guard(BBG)
         run: |
-          cd kernel_workspace/kernel_platform/common/security
-          rm -rf Kconfig
-          wget -O Kconfig https://raw.githubusercontent.com/Alhugh233/Action_OnePlus_MKSU_SUSFS/refs/heads/main/Kconfig
-          cd ../..
+          cd kernel_workspace/kernel_platform
+          CONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
           wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+          wget https://raw.githubusercontent.com/Alhugh233/Action_OnePlus_MKSU_SUSFS/refs/heads/main/BBG.patch -O BBG.patch
+          patch "common/security/Kconfig" < BBG.patch
           echo "CONFIG_BBG=y" >> "$CONFIG_FILE"
 
       - name: Build kernel
