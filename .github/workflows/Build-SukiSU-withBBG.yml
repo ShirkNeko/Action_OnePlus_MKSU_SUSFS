@@ -337,8 +337,11 @@ jobs:
         run: |
           cd kernel_workspace/kernel_platform
           wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
-          wget https://raw.githubusercontent.com/Alhugh233/Action_OnePlus_MKSU_SUSFS/refs/heads/main/BBG.patch -O BBG.patch
-          patch "common/security/Kconfig" < BBG.patch
+          wget https://raw.githubusercontent.com/Alhugh233/Action_OnePlus_MKSU_SUSFS/refs/heads/main/BBG.patch
+          mv BBG.patch common/security
+          cd common/security
+          patch "Kconfig" < BBG.patch
+          cd ../..
           echo "CONFIG_BBG=y" >> "$CONFIG_FILE"
 
       - name: Build kernel
