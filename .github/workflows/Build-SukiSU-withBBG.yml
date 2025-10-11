@@ -338,8 +338,7 @@ jobs:
           cd kernel_workspace/kernel_platform
           CONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
           wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
-          wget https://raw.githubusercontent.com/Alhugh233/Action_OnePlus_MKSU_SUSFS/refs/heads/main/BBG.patch -O BBG.patch
-          patch "common/security/Kconfig" < BBG.patch
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/landlock/landlock,baseband_guard/ } }' common/security/Kconfig
           echo "CONFIG_BBG=y" >> "$CONFIG_FILE"
 
       - name: Build kernel
