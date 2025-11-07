@@ -226,6 +226,34 @@ jobs:
           echo "vfs_patch完成"
           fi
 
+      - name: Apply sys_reboot Manual Hook Fix
+        if: ${{ github.event.inputs.VFS == 'true' }}
+        run: |
+          REBOOT_FILE="kernel_workspace/kernel_platform/common/kernel/reboot.c"
+
+          if [ -f "$REBOOT_FILE" ]; then
+            echo "Applying sys_reboot hook to $REBOOT_FILE..."
+
+            # 1. 在 SYSCALL_DEFINE4(reboot, 之前添加 extern 声明
+            sed -i '/^SYSCALL_DEFINE4(reboot,/i \
+            #ifdef CONFIG_KSU\
+            extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\
+            #endif
+            ' "$REBOOT_FILE"
+
+            # 2. 在 SYSCALL_DEFINE4(reboot,...) 函数的 { 之后添加函数调用
+            sed -i '/^SYSCALL_DEFINE4(reboot,/,/^{/!b; /^{/a \
+            \	#ifdef CONFIG_KSU\
+            	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\
+            \	#endif
+            ' "$REBOOT_FILE"
+
+            echo "sys_reboot hook applied successfully."
+          else
+            echo "ERROR: $REBOOT_FILE not found! 无法应用 sys_reboot 补丁。"
+            exit 1
+          fi
+
       - name: Apply LZ4KD
         run: |
           cd kernel_workspace/kernel_platform/common
