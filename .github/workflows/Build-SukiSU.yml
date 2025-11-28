@@ -15,6 +15,7 @@ on:
           - sm8550
           - sm8650
           - sm8750
+          - sm8850
       FEIL:
         type: choice
         description: "配置文件"
@@ -44,6 +45,7 @@ on:
           - oneplus_ace5_pro
           - oneplus_pad_2_pro
           - oneplus_pad_3
+          - oneplus_15
           - GitHub有bug可能不显示最后一项,误使用此项
       CPUD:
         type: choice
@@ -56,6 +58,7 @@ on:
           - kalama
           - pineapple
           - sun
+          - canoe
       ANDROID_VERSION:
         type: choice
         description: "内核安卓版本"
@@ -364,7 +367,7 @@ jobs:
           fi
 
           # 可选复制其它新文件（如果存在）
-          if [ "${{ github.event.inputs.CPU }}" = "sm8750" ]; then
+          if [ "${{ github.event.inputs.CPU }}" = "sm8750" ] || [ "${{ github.event.inputs.CPU }}" = "sm8850" ]; then
           for file in dtbo.img system_dlkm.erofs.img vendor_dlkm.img vendor_boot.img; do
             if [ -f "$dir1$file" ]; then
               target_name="$file"
