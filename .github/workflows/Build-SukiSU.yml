@@ -6,7 +6,7 @@ on:
         type: choice
         description: "分支"
         required: true
-        default: sm8550
+        default: sm8750
         options:
           - sm7550
           - sm7675
@@ -20,7 +20,7 @@ on:
         type: choice
         description: "配置文件"
         required: true
-        default: oneplus_ace2_pro_v
+        default: oneplus_13t
         options:
           - oneplus_nord_ce4_v
           - oneplus_ace_3v_v
@@ -51,7 +51,7 @@ on:
         type: choice
         description: "处理器代号"
         required: true
-        default: kalama
+        default: sun
         options:
           - crow
           - waipio
