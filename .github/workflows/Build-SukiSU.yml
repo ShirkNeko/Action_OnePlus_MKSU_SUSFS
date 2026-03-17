@@ -1,6 +1,8 @@
 name: Build OnePlus_SukiSU Ultra All
 on:
   workflow_dispatch:
+  push:
+    branches: LSPXXG-patch-1
     inputs:
       CPU:
         type: choice
