@@ -319,21 +319,16 @@ jobs:
           CPUD="${{ github.event.inputs.CPUD }}"
           METHOD="${{ github.event.inputs.BUILD_METHOD }}"
           
-          # 定义搜索路径
-          search_paths=(
+          image_path=""
+          # 查找路径列表
+          paths=(
             "kernel_workspace/kernel_platform/out/msm-kernel-$CPUD-$METHOD/dist/Image"
             "kernel_workspace/kernel_platform/bazel-out/k8-fastbuild/bin/msm-kernel/${CPUD}_gki_kbuild_mixed_tree/Image"
             "kernel_workspace/kernel_platform/out/msm-$CPUD-$CPUD-$METHOD/dist/Image"
             "kernel_workspace/kernel_platform/out/msm-kernel-$CPUD-$METHOD/gki_kernel/common/arch/arm64/boot/Image"
-            "kernel_workspace/kernel_platform/out/msm-$CPUD-$CPUD-$METHOD/gki_kernel/common/arch/arm64/boot/Image"
           )
-
-          image_path=""
-          for path in "${search_paths[@]}"; do
-            if [ -f "$path" ]; then
-              image_path="$path"
-              break
-            fi
+          for p in "${paths[@]}"; do
+            if [ -f "$p" ]; then image_path="$p"; break; fi
           done
 
           if [ -z "$image_path" ]; then
@@ -343,19 +338,7 @@ jobs:
           if [ -f "$image_path" ]; then
             cp "$image_path" ./AnyKernel3/Image
           else
-            echo "未找到 Image 文件，构建失败"
-            exit 1
-          fi
-
-          # 复制其他镜像文件
-          if [[ "${{ github.event.inputs.CPU }}" =~ ^sm8(750|850)$ ]]; then
-            dist_dir="kernel_workspace/kernel_platform/out/msm-kernel-$CPUD-$METHOD/dist/"
-            for file in dtbo.img system_dlkm.erofs.img vendor_dlkm.img vendor_boot.img; do
-              if [ -f "$dist_dir$file" ]; then
-                target_name="${file/.erofs/}"
-                cp "$dist_dir$file" "./AnyKernel3/$target_name"
-              fi
-            done
+            echo "未找到 Image 文件" && exit 1
           fi
 
       - name: Apply patch_linux and replace Image
@@ -369,11 +352,30 @@ jobs:
 
       - name: Download Latest SUSFS Module from CI
         if: ${{ github.event.inputs.SUSFS_CI == 'true' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          LATEST_RUN_ID=$(gh run list --repo sidex15/susfs4ksu-module --branch "v1.5.2+" --status success --limit 1 --json databaseId -q '.[0].databaseId')
-          gh run download $LATEST_RUN_ID --repo sidex15/susfs4ksu-module -n "ksu_module_susfs" --dir ./AnyKernel3/
+          # 换回原生的 curl + jq 逻辑
+          TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          REPO="sidex15/susfs4ksu-module"
+          # 注意：URL 编码 branch 中的 + 号为 %2B
+          RUNS_URL="https://api.github.com/repos/$REPO/actions/runs?branch=v1.5.2%2B&status=success&per_page=1"
+          
+          LATEST_RUN_ID=$(curl -s -H "Authorization: token $TOKEN" "$RUNS_URL" | jq -r '.workflow_runs[0].id')
+          
+          if [ "$LATEST_RUN_ID" == "null" ] || [ -z "$LATEST_RUN_ID" ]; then
+            echo "错误：未找到成功的 CI 运行记录。"
+            exit 1
+          fi
+
+          ARTIFACTS_URL="https://api.github.com/repos/$REPO/actions/runs/$LATEST_RUN_ID/artifacts"
+          DOWNLOAD_URL=$(curl -s -H "Authorization: token $TOKEN" "$ARTIFACTS_URL" | jq -r '.artifacts[0].archive_download_url')
+
+          if [ "$DOWNLOAD_URL" == "null" ] || [ -z "$DOWNLOAD_URL" ]; then
+            echo "错误：未找到构建产物下载地址。"
+            exit 1
+          fi
+
+          curl -L -H "Authorization: token $TOKEN" -o ksu_module_susfs.zip "$DOWNLOAD_URL"
+          cp ksu_module_susfs.zip ./AnyKernel3/
 
       - name: Download Latest SUSFS Module from Release
         if: ${{ github.event.inputs.SUSFS_CI == 'false' }}
@@ -398,7 +400,6 @@ jobs:
           echo "value=$clean_feil" >> $GITHUB_OUTPUT
 
       - name: Upload AnyKernel3
-        # 核心修改点：升级至 v7 (支持 Node.js 24)
         uses: actions/upload-artifact@v7
         with:
           name: AnyKernel3_SukiSUUltra_${{ env.KSUVER }}_${{ steps.feil_clean.outputs.value }}${{ steps.suffix.outputs.value }}
