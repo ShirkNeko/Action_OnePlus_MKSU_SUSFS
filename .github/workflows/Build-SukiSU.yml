@@ -149,6 +149,18 @@ jobs:
           echo "Selected VFS: ${{ github.event.inputs.VFS }}"
           echo "Selected KPM: ${{ github.event.inputs.KPM }}"
 
+      - name: Validate inputs (susfs branch must exist)
+        run: |
+          BR="gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}"
+          AVAIL=$(git ls-remote --heads https://gitlab.com/simonpunk/susfs4ksu.git | awk '{print $2}' | sed 's#refs/heads/##' | grep '^gki-' | grep -v -- '-dev$' | sort | tr '\n' ' ')
+          if ! echo " $AVAIL" | grep -q " $BR "; then
+            echo "::error::susfs4ksu has no branch '$BR'. ANDROID_VERSION/KERNEL_VERSION combination is invalid."
+            echo "Valid combinations: $AVAIL"
+            echo "For OnePlus Nord CE4 (sm7550, 5.15) use ANDROID_VERSION=android14 (kernel branch is android14-5.15)."
+            exit 1
+          fi
+          echo "susfs branch OK: $BR"
+
       - name: Install repo tool
         run: |
           curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
@@ -186,10 +198,79 @@ jobs:
           cd kernel_workspace/kernel_platform
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
           cd ./KernelSU
-          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10606)
+          # Align KSUVER with the SukiSU Makefile's own version formula when present
+          # (v4.x layout: VERSION_BASE + <commits on main> - VERSION_OFFSET, e.g.
+          #  40000 + N - 2815; legacy layout fallback: N + 10606). Without this the
+          # artifact name (KSUVER) and the in-kernel version banner disagree.
+          KSU_COUNT=$(/usr/bin/git rev-list --count main 2>/dev/null || echo 0)
+          VB=$(sed -n 's/^VERSION_BASE[[:space:]]*:=[[:space:]]*\([0-9]*\).*/\1/p' kernel/Makefile | head -n1)
+          VO=$(sed -n 's/^VERSION_OFFSET[[:space:]]*:=[[:space:]]*\([0-9]*\).*/\1/p' kernel/Makefile | head -n1)
+          if [ -n "$VB" ] && [ -n "$VO" ] && [ "$KSU_COUNT" -gt 0 ]; then
+            KSU_VERSION=$((VB + KSU_COUNT - VO))
+          else
+            KSU_VERSION=$((KSU_COUNT + 10606))
+          fi
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           export KSU_VERSION=$KSU_VERSION
           sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+
+          # --- FIX: restore ksu_handle_post_execveat_sucompat for the susfs4ksu kernel patch ---
+          # susfs4ksu's 50_add_susfs_in_gki-*.patch makes do_execveat_common() in fs/exec.c
+          # call ksu_handle_post_execveat_sucompat() under CONFIG_KSU_SUSFS (introduced as a
+          # direct ksu_install_su_fd() call in commit b70ff734 on 2026-09-06, refactored into
+          # the hook in 53869d88 on 2026-09-12). Vanilla KernelSU receives that symbol from
+          # susfs4ksu's companion patch KernelSU/10_enable_susfs_for_ksu.patch, where it
+          # installs the su-session fd after a successful su exec. SukiSU-Ultra's 'builtin'
+          # branch has native SUSFS support but no su-fd mechanism (the root profile is
+          # applied pre-exec via escape_with_root_profile()), so it never defined the hook:
+          #   ld.lld: error: undefined symbol: ksu_handle_post_execveat_sucompat
+          #   >>> referenced by exec.c:2006 (source/fs/exec.c:2006)
+          # Correct fix for SukiSU: an intentional no-op shim. It must stay cheap because
+          # SukiSU's ksu_handle_execveat_sucompat() always returns 0, so the patched exec.c
+          # flags EVERY execveat as an su session and calls the post hook on every success.
+          # The shim is appended to the sucompat translation unit, which works with both the
+          # v4.x unity build (ksu.c #includes feature/sucompat.c) and the legacy multi-object
+          # layout (sucompat.o). Idempotent, and self-disables if SukiSU ever ships the hook.
+          SHIM_HOST=""
+          for cand in kernel/feature/sucompat.c kernel/sucompat.c; do
+            if [ -f "$cand" ]; then SHIM_HOST="$cand"; break; fi
+          done
+          if [ -z "$SHIM_HOST" ]; then
+            echo "::error::No sucompat.c found in the SukiSU tree - cannot install the post_execveat shim. Upstream layout changed; update the workflow."
+            exit 1
+          fi
+          if grep -rq "ksu_handle_post_execveat_sucompat" kernel/; then
+            echo "ksu_handle_post_execveat_sucompat already provided natively - shim skipped"
+          else
+            cat >> "$SHIM_HOST" <<'SHIM_EOF'
+
+          /* --- CI shim: susfs4ksu kernel-patch compatibility (added by workflow) ---
+           * Referenced from do_execveat_common() in fs/exec.c (50_add_susfs_in_gki-*.patch)
+           * under CONFIG_KSU_SUSFS. Vanilla KernelSU installs the su-session fd here after
+           * a successful su exec; SukiSU-Ultra finalizes su sessions inside
+           * ksu_handle_execveat_sucompat() (escape_with_root_profile) and has no su-fd
+           * mechanism, so this hook is intentionally a no-op. Keep it cheap: with SukiSU
+           * it runs on every successful execveat.
+           */
+          #ifdef CONFIG_KSU_SUSFS
+          int ksu_handle_post_execveat_sucompat(int *fd, struct filename **filename_ptr,
+                          void *argv_user, void *envp_user,
+                          int *__never_use_flags, int *retval)
+          {
+              (void)fd;
+              (void)filename_ptr;
+              (void)argv_user;
+              (void)envp_user;
+              (void)__never_use_flags;
+              (void)retval;
+              return 0;
+          }
+          #endif
+          SHIM_EOF
+            echo "post_execveat shim appended to $SHIM_HOST"
+          fi
+          echo "=== shim verification ==="
+          grep -n "ksu_handle_post_execveat_sucompat" "$SHIM_HOST" || { echo "::error::shim installation failed"; exit 1; }
 
       - name: Apply Patches SukiSU Ultra
         run: |
@@ -212,6 +293,33 @@ jobs:
 
           cd ./common
           patch -p1 < 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch || true
+
+          # --- STEP 1: SUSFS compile-layer fixes (MUST run AFTER the susfs patch) ---
+          # --- 1a. SUSFS include fix for mm/memory.c ----------------------------------
+          # The susfs patch hunk #1 inserts '#include <linux/susfs_def.h>' right after
+          # '#include <linux/vmalloc.h>'. On the oplus tree the surrounding include
+          # context drifts, so hunk #1 is rejected and the file later fails -Werror
+          # with implicit declarations (SUSFS_IS_INODE_SUS_MAP). Re-do the insertion
+          # deterministically after the patch has run:
+          if ! grep -q "linux/susfs_def.h" mm/memory.c; then
+            sed -i '/#include <linux\/vmalloc.h>/a #include <linux/susfs_def.h>' mm/memory.c
+          fi
+
+          # --- 1b. -Werror=maybe-uninitialized fix for fs/proc/task_mmu.c -------------
+          # Idempotent safety net. NOTE: the 'struct dentry *dentry;' declaration is
+          # actually introduced by 69_hide_stuff.patch (next step), so the real fix
+          # lives in "Apply Hide Stuff Patches" (susfs-aware merge). Kept here so a
+          # re-run on an already-patched tree stays clean:
+          sed -i 's/struct dentry \*dentry;/struct dentry *dentry = NULL;/g' fs/proc/task_mmu.c || true
+
+          echo "=== SUSFS fix-up verification ==="
+          grep -n "linux/susfs_def.h" mm/memory.c || echo "WARNING: susfs_def.h include still missing in mm/memory.c"
+          if [ -f mm/memory.c.rej ]; then
+            echo "mm/memory.c.rej present (expected: hunk #1 include-context drift, fixed by 1a):"; cat mm/memory.c.rej
+          fi
+          for r in $(find . -name '*.rej' -not -path './mm/memory.c.rej' 2>/dev/null); do
+            echo "::warning::Unexpected susfs reject: $r"; cat "$r"
+          done
           echo "完成"
 
       - name: Apply Hide Stuff Patches
@@ -219,7 +327,97 @@ jobs:
           cd kernel_workspace/kernel_platform/common
           cp ../../SukiSU_patch/69_hide_stuff.patch ./
           echo "正在打隐藏应用补丁"
-          patch -p1 -F 3 < 69_hide_stuff.patch
+
+          # 69_hide_stuff.patch touches two files:
+          #   fs/proc/task_mmu.c  -> its hunk #3 was written against a tree WITHOUT
+          #                          susfs. On the susfs-patched show_map_vma() it
+          #                          only applies with fuzz 3 and lands INSIDE the
+          #                          susfs OPEN_REDIRECT block, producing broken
+          #                          control flow and the -Werror
+          #                          'dentry is used uninitialized' failure.
+          #   fs/proc/base.c      -> applies cleanly; keep using patch(1) for it.
+          # So: apply base.c with patch, and do task_mmu.c with an anchor-based
+          # merge that is aware of the susfs layout (verified against the real
+          # OnePlusOSS sm7550 tree + susfs gki-android14-5.15).
+          awk '/^--- a\/fs\/proc\/base\.c/{p=1} p' 69_hide_stuff.patch > 69_hide_stuff_base_only.patch
+          if [ -s 69_hide_stuff_base_only.patch ]; then
+            patch -p1 -N -F 3 < 69_hide_stuff_base_only.patch || echo "base.c hunk already applied"
+          else
+            echo "::warning::could not split base.c hunk out of 69_hide_stuff.patch; applying whole patch"
+            patch -p1 -F 3 < 69_hide_stuff.patch || true
+          fi
+
+          python3 - <<'PY'
+          import sys
+          p = "fs/proc/task_mmu.c"
+          s = open(p).read()
+          if "show_vma_header_prefix_fake" in s:
+              print("hide_stuff task_mmu.c already merged, skipping"); sys.exit(0)
+
+          helper = (
+              "static void show_vma_header_prefix_fake(struct seq_file *m,\n"
+              "\t\t\t\t\tunsigned long start, unsigned long end,\n"
+              "\t\t\t\t\tvm_flags_t flags, unsigned long long pgoff,\n"
+              "\t\t\t\t\tdev_t dev, unsigned long ino)\n"
+              "{\n"
+              "\tseq_setwidth(m, 25 + sizeof(void *) * 6 - 1);\n"
+              "\tseq_printf(m, \"%08lx-%08lx %c%c%c%c %08llx %02x:%02x %lu \",\n"
+              "\t\t\tstart,\n"
+              "\t\t\tend,\n"
+              "\t\t\tflags & VM_READ ? 'r' : '-',\n"
+              "\t\t\tflags & VM_WRITE ? 'w' : '-',\n"
+              "\t\t\tflags & VM_EXEC ? '-' : '-',\n"
+              "\t\t\tflags & VM_MAYSHARE ? 's' : 'p',\n"
+              "\t\t\tpgoff,\n"
+              "\t\t\tMAJOR(dev), MINOR(dev), ino);\n"
+              "}\n\n"
+          )
+          a1 = "static void\nshow_map_vma(struct seq_file *m, struct vm_area_struct *vma)\n{\n"
+          assert s.count(a1) == 1, "show_map_vma anchor not unique"
+          s = s.replace(a1, helper + a1)
+
+          i = s.index(a1)
+          j = s.index("\ndone:\n", i)
+          fn = s[i:j]
+
+          a2 = "\tconst char *name = NULL;\n"
+          assert fn.count(a2) == 1, "name decl anchor not unique"
+          fn = fn.replace(a2, a2 + "\tstruct dentry *dentry = NULL;\n")
+
+          a3 = ("\t}\n\n\tstart = vma->vm_start;\n\tend = vma->vm_end;\n"
+                "\tshow_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);\n")
+          assert fn.count(a3) == 1, "header-prefix anchor not unique"
+          blk = (
+              "\t\tdentry = file->f_path.dentry;\n"
+              "\t\tif (dentry) {\n"
+              "\t\t\tconst char *path = (const char *)dentry->d_name.name;\n"
+              "\t\t\tif (strstr(path, \"lineage\")) {\n"
+              "\t\t\t\tstart = vma->vm_start;\n"
+              "\t\t\t\tend = vma->vm_end;\n"
+              "\t\t\t\tshow_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);\n"
+              "\t\t\t\tname = \"/system/framework/framework-res.apk\";\n"
+              "\t\t\t\tgoto done;\n"
+              "\t\t\t}\n"
+              "\t\t\tif (strstr(path, \"jit-zygote-cache\")) {\n"
+              "\t\t\t\tstart = vma->vm_start;\n"
+              "\t\t\t\tend = vma->vm_end;\n"
+              "\t\t\t\tshow_vma_header_prefix_fake(m, start, end, flags, pgoff, dev, ino);\n"
+              "\t\t\t\tgoto bypass;\n"
+              "\t\t\t}\n"
+              "\t\t}\n"
+          )
+          fn = fn.replace(a3, blk + a3 + "\nbypass:\n")
+          s = s[:i] + fn + s[j:]
+          open(p, "w").write(s)
+          print("hide_stuff task_mmu.c merged (susfs-aware)")
+          PY
+
+          echo "=== hide_stuff verification (show_map_vma) ==="
+          grep -n "struct dentry \*dentry = NULL;\|goto bypass;\|^bypass:\|show_vma_header_prefix_fake" fs/proc/task_mmu.c | head -n 8
+          if grep -q "struct dentry \*dentry;" fs/proc/task_mmu.c; then
+            echo "::error::uninitialized dentry declaration still present in task_mmu.c"; exit 1
+          fi
+          echo "完成"
 
       - name: Apply LZ4KD
         run: |
@@ -239,25 +437,37 @@ jobs:
           KERNEL_VERSION="${{ github.event.inputs.KERNEL_VERSION }}"
 
           # SukiSU Ultra config
-          echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KPM=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_KSU=" "$CONFIG_FILE" || echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
+
+          # --- STEP 3: Kconfig symbol management (KPM + stale-symbol cleanup) ---
+          # --- 3a. KPM (SukiSU Kernel Patch Module) ------------------------------------
+          # Official SukiSU-Ultra requirement: CONFIG_KPM=y (KALLSYMS is already on in
+          # GKI). The symbol only exists AFTER the SukiSU/KPM kernel patches have been
+          # applied, so this must run after patching and before the build:
+          if [ "${{ github.event.inputs.KPM }}" = "true" ]; then
+            grep -q "^CONFIG_KPM=" "$CONFIG_FILE" || echo "CONFIG_KPM=y" >> "$CONFIG_FILE"
+          fi
 
           # SUSFS config
-          echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_KSU_SUSFS=" "$CONFIG_FILE" || echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_KSU_SUSFS_SUS_PATH=" "$CONFIG_FILE" || echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_KSU_SUSFS_SUS_MOUNT=" "$CONFIG_FILE" || echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=" "$CONFIG_FILE" || echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=" "$CONFIG_FILE" || echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_KSU_SUSFS_SUS_KSTAT=" "$CONFIG_FILE" || echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_KSU_SUSFS_SUS_OVERLAYFS=" "$CONFIG_FILE" || echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_KSU_SUSFS_TRY_UMOUNT=" "$CONFIG_FILE" || echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=" "$CONFIG_FILE" || echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_KSU_SUSFS_SPOOF_UNAME=" "$CONFIG_FILE" || echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_KSU_SUSFS_ENABLE_LOG=" "$CONFIG_FILE" || echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=" "$CONFIG_FILE" || echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=" "$CONFIG_FILE" || echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_KSU_SUSFS_OPEN_REDIRECT=" "$CONFIG_FILE" || echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CONFIG_FILE"
+
+          # --- 3b. Remove stale SUSFS magic-mount symbol -------------------------------
+          # SUSFS v1.5.2+ no longer defines CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT; leaving it
+          # in the defconfig only produces kconfig warnings on every build:
+          sed -i '/CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT/d' "$CONFIG_FILE"
 
           # Remove check_defconfig
           sed -i 's/check_defconfig//' ./common/build.config.gki
@@ -267,24 +477,24 @@ jobs:
           CONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
 
             if [ "${{ github.event.inputs.KERNEL_VERSION }}" = "5.10" ]; then
-              echo "CONFIG_ZSMALLOC=y" >> "$CONFIG_FILE"
-              echo "CONFIG_ZRAM=y" >> "$CONFIG_FILE"
-              echo "CONFIG_MODULE_SIG=n" >> "$CONFIG_FILE"
-              echo "CONFIG_CRYPTO_LZO=y" >> "$CONFIG_FILE"
-              echo "CONFIG_ZRAM_DEF_COMP_LZ4KD=y" >> "$CONFIG_FILE"
+              grep -q "^CONFIG_ZSMALLOC=" "$CONFIG_FILE" || echo "CONFIG_ZSMALLOC=y" >> "$CONFIG_FILE"
+              grep -q "^CONFIG_ZRAM=" "$CONFIG_FILE" || echo "CONFIG_ZRAM=y" >> "$CONFIG_FILE"
+              grep -q "^CONFIG_MODULE_SIG=" "$CONFIG_FILE" || echo "CONFIG_MODULE_SIG=n" >> "$CONFIG_FILE"
+              grep -q "^CONFIG_CRYPTO_LZO=" "$CONFIG_FILE" || echo "CONFIG_CRYPTO_LZO=y" >> "$CONFIG_FILE"
+              grep -q "^CONFIG_ZRAM_DEF_COMP_LZ4KD=" "$CONFIG_FILE" || echo "CONFIG_ZRAM_DEF_COMP_LZ4KD=y" >> "$CONFIG_FILE"
             fi
 
             if [ "${{ github.event.inputs.KERNEL_VERSION }}" != "6.6" ] && [ "${{ github.event.inputs.KERNEL_VERSION }}" != "6.12" ] && [ "${{ github.event.inputs.KERNEL_VERSION }}" != "5.10" ]; then
               if grep -q "CONFIG_ZSMALLOC" -- "$CONFIG_FILE"; then
                 sed -i 's/CONFIG_ZSMALLOC=m/CONFIG_ZSMALLOC=y/g' "$CONFIG_FILE"
               else
-                echo "CONFIG_ZSMALLOC=y" >> "$CONFIG_FILE"
+                grep -q "^CONFIG_ZSMALLOC=" "$CONFIG_FILE" || echo "CONFIG_ZSMALLOC=y" >> "$CONFIG_FILE"
               fi
               sed -i 's/CONFIG_ZRAM=m/CONFIG_ZRAM=y/g' "$CONFIG_FILE"
             fi
 
             if [ "${{ github.event.inputs.KERNEL_VERSION }}" = "6.6" ] || [ "${{ github.event.inputs.KERNEL_VERSION }}" = "6.12" ]; then
-              echo "CONFIG_ZSMALLOC=y" >> "$CONFIG_FILE"
+              grep -q "^CONFIG_ZSMALLOC=" "$CONFIG_FILE" || echo "CONFIG_ZSMALLOC=y" >> "$CONFIG_FILE"
               sed -i 's/CONFIG_ZRAM=m/CONFIG_ZRAM=y/g' "$CONFIG_FILE"
             fi
 
@@ -299,85 +509,288 @@ jobs:
                 echo "CONFIG_ZRAM=y" >> "msm-kernel/arch/arm64/configs/${{ github.event.inputs.CPUD }}-GKI.config"
               fi
               
-              echo "CONFIG_MODULE_SIG_FORCE=n" >> "$CONFIG_FILE"
+              grep -q "^CONFIG_MODULE_SIG_FORCE=" "$CONFIG_FILE" || echo "CONFIG_MODULE_SIG_FORCE=n" >> "$CONFIG_FILE"
             elif [ "${{ github.event.inputs.KERNEL_VERSION }}" = "5.10" ] || [ "${{ github.event.inputs.KERNEL_VERSION }}" = "5.15" ]; then
               rm "common/android/gki_aarch64_modules"
               touch "common/android/gki_aarch64_modules"
             fi
 
             if grep -q "CONFIG_ZSMALLOC=y" "$CONFIG_FILE" && grep -q "CONFIG_ZRAM=y" "$CONFIG_FILE"; then
-              echo "CONFIG_CRYPTO_LZ4HC=y" >> "$CONFIG_FILE"
-              echo "CONFIG_CRYPTO_LZ4K=y" >> "$CONFIG_FILE"
-              echo "CONFIG_CRYPTO_LZ4KD=y" >> "$CONFIG_FILE"
-              echo "CONFIG_CRYPTO_842=y" >> "$CONFIG_FILE"
-              echo "CONFIG_ZRAM_WRITEBACK=y" >> "$CONFIG_FILE"
+              grep -q "^CONFIG_CRYPTO_LZ4HC=" "$CONFIG_FILE" || echo "CONFIG_CRYPTO_LZ4HC=y" >> "$CONFIG_FILE"
+              grep -q "^CONFIG_CRYPTO_LZ4K=" "$CONFIG_FILE" || echo "CONFIG_CRYPTO_LZ4K=y" >> "$CONFIG_FILE"
+              grep -q "^CONFIG_CRYPTO_LZ4KD=" "$CONFIG_FILE" || echo "CONFIG_CRYPTO_LZ4KD=y" >> "$CONFIG_FILE"
+              grep -q "^CONFIG_CRYPTO_842=" "$CONFIG_FILE" || echo "CONFIG_CRYPTO_842=y" >> "$CONFIG_FILE"
+              grep -q "^CONFIG_ZRAM_WRITEBACK=" "$CONFIG_FILE" || echo "CONFIG_ZRAM_WRITEBACK=y" >> "$CONFIG_FILE"
             fi
           fi
+
+          # =====================================================================
+          # STEP 4: Performance configuration injection (verified 5.15 symbols ONLY)
+          # Every symbol below exists in the Linux 5.15 Kconfig sources and in the
+          # OnePlusOSS sm7550 tree. All echoes are guarded so re-runs are idempotent.
+          # =====================================================================
+          CONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
+
+          # --- 4a. Network: BBR + FQ ----------------------------------------------------
+          # TCP_CONG_BBR lives inside 'if TCP_CONG_ADVANCED' in 5.15 — the gate is
+          # MANDATORY or kconfig silently drops BBR:
+          grep -q "^CONFIG_TCP_CONG_ADVANCED=" "$CONFIG_FILE" || echo "CONFIG_TCP_CONG_ADVANCED=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_TCP_CONG_BBR="       "$CONFIG_FILE" || echo "CONFIG_TCP_CONG_BBR=y"       >> "$CONFIG_FILE"
+          grep -q "^CONFIG_DEFAULT_BBR="        "$CONFIG_FILE" || echo "CONFIG_DEFAULT_BBR=y"        >> "$CONFIG_FILE"
+          grep -q "^CONFIG_DEFAULT_TCP_CONG="   "$CONFIG_FILE" || echo 'CONFIG_DEFAULT_TCP_CONG="bbr"' >> "$CONFIG_FILE"
+          # FQ pacing qdisc (already =y in this tree's gki_defconfig; kept as ensure):
+          grep -q "^CONFIG_NET_SCH_FQ="         "$CONFIG_FILE" || echo "CONFIG_NET_SCH_FQ=y"         >> "$CONFIG_FILE"
+          # Make FQ the system default qdisc (valid 5.15 symbols:
+          # NET_SCH_DEFAULT + DEFAULT_FQ -> DEFAULT_NET_SCH="fq"):
+          grep -q "^CONFIG_NET_SCH_DEFAULT="    "$CONFIG_FILE" || echo "CONFIG_NET_SCH_DEFAULT=y"    >> "$CONFIG_FILE"
+          grep -q "^CONFIG_DEFAULT_FQ="         "$CONFIG_FILE" || echo "CONFIG_DEFAULT_FQ=y"         >> "$CONFIG_FILE"
+          # NOTE: there is NO ECN Kconfig symbol in 5.15 (CONFIG_IP_ECN is invalid).
+          # ECN is unconditionally compiled and runtime-controlled via sysctl
+          # net.ipv4.tcp_ecn. Do NOT echo any ECN config line.
+          # Extra qdisc / diag bits (all valid 5.15 symbols, all guarded):
+          grep -q "^CONFIG_NET_SCH_CAKE="       "$CONFIG_FILE" || echo "CONFIG_NET_SCH_CAKE=y"       >> "$CONFIG_FILE"
+          grep -q "^CONFIG_TCP_CONG_CUBIC="     "$CONFIG_FILE" || echo "CONFIG_TCP_CONG_CUBIC=y"     >> "$CONFIG_FILE"
+          grep -q "^CONFIG_TCP_CONG_WESTWOOD="  "$CONFIG_FILE" || echo "CONFIG_TCP_CONG_WESTWOOD=y"  >> "$CONFIG_FILE"
+
+          # --- 4b. GPU devfreq (mainline governors only) --------------------------------
+          # The Adreno-720 KGSL driver and the MSM_ADRENO_TZ governor are built from the
+          # vendor modules side with stock fragments; CONFIG_MSM_KGSL /
+          # CONFIG_DEVFREQ_GOV_MSM_ADRENO_TZ do not exist in the GKI kernel tree.
+          # Ensure the mainline governors instead — SIMPLE_ONDEMAND is the one KGSL
+          # falls back to and is missing from the tree's gki_defconfig:
+          grep -q "^CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND=" "$CONFIG_FILE" || echo "CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_DEVFREQ_GOV_PERFORMANCE="     "$CONFIG_FILE" || echo "CONFIG_DEVFREQ_GOV_PERFORMANCE=y"     >> "$CONFIG_FILE"
+          grep -q "^CONFIG_DEVFREQ_GOV_USERSPACE="       "$CONFIG_FILE" || echo "CONFIG_DEVFREQ_GOV_USERSPACE=y"       >> "$CONFIG_FILE"
+
+          # --- 4c. ZRAM: default compressor (5.15-correct method) -----------------------
+          # The 5.15 zram driver reads CONFIG_ZRAM_DEF_COMP from a real Kconfig choice.
+          # Set LZ4 unless the LZ4KD workflow path already selected a choice member
+          # (ZRAM_DEF_COMP is a choice — two members would just conflict):
+          grep -q "^CONFIG_ZRAM="              "$CONFIG_FILE" || echo "CONFIG_ZRAM=y"              >> "$CONFIG_FILE"
+          grep -q "^CONFIG_CRYPTO_LZ4="        "$CONFIG_FILE" || echo "CONFIG_CRYPTO_LZ4=y"        >> "$CONFIG_FILE"
+          grep -q "^CONFIG_CRYPTO_LZ4HC="      "$CONFIG_FILE" || echo "CONFIG_CRYPTO_LZ4HC=y"      >> "$CONFIG_FILE"
+          if [ "${{ github.event.inputs.ZRAM }}" = "true" ] && grep -q "config ZRAM_DEF_COMP_LZ4KD" ./common/drivers/block/zram/Kconfig 2>/dev/null; then
+            # LZ4KD build: the lz4kd.patch adds the LZ4KD choice member and makes it
+            # the Kconfig default. Select it explicitly so an LZ4 selection can never
+            # override it (choice = exactly one member wins):
+            sed -i '/^CONFIG_ZRAM_DEF_COMP_LZ4=y/d' "$CONFIG_FILE"
+            grep -q "^CONFIG_ZRAM_DEF_COMP_LZ4KD=" "$CONFIG_FILE" || echo "CONFIG_ZRAM_DEF_COMP_LZ4KD=y" >> "$CONFIG_FILE"
+          elif ! grep -q "^CONFIG_ZRAM_DEF_COMP_LZ4KD=y" "$CONFIG_FILE"; then
+            grep -q "^CONFIG_ZRAM_DEF_COMP_LZ4=" "$CONFIG_FILE" || echo "CONFIG_ZRAM_DEF_COMP_LZ4=y" >> "$CONFIG_FILE"
+          fi
+          grep -q "^CONFIG_ZRAM_WRITEBACK="    "$CONFIG_FILE" || echo "CONFIG_ZRAM_WRITEBACK=y"    >> "$CONFIG_FILE"
+
+          # --- 4d. Scheduler: utilization clamping --------------------------------------
+          # Already =y in this tree's gki_defconfig; kept as idempotent ensures:
+          grep -q "^CONFIG_UCLAMP_TASK="       "$CONFIG_FILE" || echo "CONFIG_UCLAMP_TASK=y"       >> "$CONFIG_FILE"
+          grep -q "^CONFIG_UCLAMP_TASK_GROUP=" "$CONFIG_FILE" || echo "CONFIG_UCLAMP_TASK_GROUP=y" >> "$CONFIG_FILE"
+
+          # --- 4e. I/O scheduler ---------------------------------------------------------
+          # Valid 5.15 symbol (mainline default y); coexists with the tree's BFQ:
+          grep -q "^CONFIG_MQ_IOSCHED_KYBER="  "$CONFIG_FILE" || echo "CONFIG_MQ_IOSCHED_KYBER=y" >> "$CONFIG_FILE"
+
+          # --- 4f. Compiler / allocator ---------------------------------------------------
+          # This tree's gki_defconfig pins CONFIG_LTO_CLANG_FULL=y. LTO level is a
+          # Kconfig choice, so DELETE FULL before appending THIN (large CI speedup):
+          sed -i '/^CONFIG_LTO_CLANG_FULL=y/d' "$CONFIG_FILE"
+          grep -q "^CONFIG_LTO_CLANG_THIN="    "$CONFIG_FILE" || echo "CONFIG_LTO_CLANG_THIN=y"   >> "$CONFIG_FILE"
+          # SLUB debug support off (valid 5.15 symbol; the runtime slub_debug= param
+          # then becomes a no-op, which is the intent):
+          grep -q "^CONFIG_SLUB_DEBUG="        "$CONFIG_FILE" || echo "CONFIG_SLUB_DEBUG=n"       >> "$CONFIG_FILE"
+          # DEBUG_INFO: the tree base sets DEBUG_INFO=y + DWARF4 + DEBUG_INFO_BTF=y and
+          # the oplus fragment already adds DEBUG_INFO_REDUCED=y. Turning DEBUG_INFO off
+          # also kills BTF, which breaks the Android bpfloader / tethering offload on
+          # Android 13+ ROMs. RECOMMENDED: leave debug info untouched (the flashable
+          # Image contains no DWARF anyway — only vmlinux and .ko files do).
+          # Only if you explicitly accept the bpfloader risk, uncomment the next line:
+          # sed -i '/^CONFIG_DEBUG_INFO=y/d;/^CONFIG_DEBUG_INFO_DWARF4=y/d;/^CONFIG_DEBUG_INFO_BTF=y/d' "$CONFIG_FILE" && echo "# CONFIG_DEBUG_INFO is not set" >> "$CONFIG_FILE"
+          # NTSYNC: does NOT exist in 5.15 (merged upstream in 6.7 under drivers/misc).
+          # Only meaningful for Wine/Winlator users and only after an explicit backport
+          # of the ntsync driver into this tree. Guarded no-op otherwise:
+          if [ -d ./common/drivers/misc/ntsync ] || [ -d ./common/fs/ntsync ]; then
+            grep -q "^CONFIG_NTSYNC=" "$CONFIG_FILE" || echo "CONFIG_NTSYNC=y" >> "$CONFIG_FILE"
+          fi
+
+          # --- 4h. Memory / scheduler / storage (verified 5.15 symbols, all guarded) --------
+          # MGLRU on by default (tree has LRU_GEN=y but not the _ENABLED default, so
+          # it is compiled in yet dormant until userspace flips /sys/kernel/mm/lru_gen):
+          grep -q "^CONFIG_LRU_GEN_ENABLED="   "$CONFIG_FILE" || echo "CONFIG_LRU_GEN_ENABLED=y"   >> "$CONFIG_FILE"
+          # mq-deadline as a selectable alternative (kyber/bfq already present):
+          grep -q "^CONFIG_MQ_IOSCHED_DEADLINE=" "$CONFIG_FILE" || echo "CONFIG_MQ_IOSCHED_DEADLINE=y" >> "$CONFIG_FILE"
+          # F2FS transparent compression back-ends (compression=y is already set but
+          # only the LZO/LZ4 algorithms the ROM picks at mkfs can be used; provide all):
+          grep -q "^CONFIG_F2FS_FS_LZ4="        "$CONFIG_FILE" || echo "CONFIG_F2FS_FS_LZ4=y"        >> "$CONFIG_FILE"
+          grep -q "^CONFIG_F2FS_FS_LZ4HC="      "$CONFIG_FILE" || echo "CONFIG_F2FS_FS_LZ4HC=y"      >> "$CONFIG_FILE"
+          grep -q "^CONFIG_F2FS_FS_ZSTD="       "$CONFIG_FILE" || echo "CONFIG_F2FS_FS_ZSTD=y"       >> "$CONFIG_FILE"
+          grep -q "^CONFIG_F2FS_IOSTAT="        "$CONFIG_FILE" || echo "CONFIG_F2FS_IOSTAT=y"        >> "$CONFIG_FILE"
+          # Faster crypto primitives used by fscrypt/dm-verity/WireGuard (ARM64 CE/NEON):
+          grep -q "^CONFIG_CRYPTO_CHACHA20_NEON=" "$CONFIG_FILE" || echo "CONFIG_CRYPTO_CHACHA20_NEON=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_CRYPTO_POLY1305_NEON=" "$CONFIG_FILE" || echo "CONFIG_CRYPTO_POLY1305_NEON=y" >> "$CONFIG_FILE"
+          grep -q "^CONFIG_CRYPTO_CRCT10DIF_ARM64_CE=" "$CONFIG_FILE" || echo "CONFIG_CRYPTO_CRCT10DIF_ARM64_CE=y" >> "$CONFIG_FILE"
+          # LSE atomics on Cortex-A7xx (faster locks/refcounts; ARM64_USE_LSE_ATOMICS):
+          grep -q "^CONFIG_ARM64_USE_LSE_ATOMICS=" "$CONFIG_FILE" || echo "CONFIG_ARM64_USE_LSE_ATOMICS=y" >> "$CONFIG_FILE"
+          # NOTE (deliberately NOT changed - each would break the GKI KMI or the vendor
+          # modules this Image must load): HZ (250 stays), PREEMPT model, SCHED_AUTOGROUP
+          # (changes signal_struct layout), CC_OPTIMIZE_* (O2 stays), KASAN/UBSAN/KFENCE
+          # (part of the vendor .config contract), any CPU_FREQ_GOV_* (the SoC uses the
+          # WALT governor which is a vendor module: CONFIG_SCHED_WALT=m), MSM_KGSL /
+          # Adreno-TZ (vendor module). Those are tuned at runtime by the bundled
+          # perf-tuner KSU module instead (see 'Build runtime tuner module' step).
+
+          # =====================================================================
+          # STEP 4g: Network *parameter* tuning (source-level sysctl defaults)
+          # These are NOT Kconfig symbols; they are the per-netns defaults set in
+          # tcp_sk_init() (net/ipv4/tcp_ipv4.c) and net/core/dev.c. Android's
+          # init.rc only writes rmem_max/wmem_max/ping_group_range/fwmark bits,
+          # so these kernel defaults are what the device actually runs with.
+          # Every sed matches the exact 5.15 line verified in the OnePlusOSS
+          # sm7550 tree and is idempotent (re-running changes nothing). If a
+          # pattern is missing on a different tree, the sed is a no-op and the
+          # audit block below reports it.
+          # =====================================================================
+          TCP_SRC=./common/net/ipv4/tcp_ipv4.c
+          DEV_SRC=./common/net/core/dev.c
+          if [ -f "$TCP_SRC" ]; then
+            # ECN: 2 = respond only -> 1 = request+respond (pairs with BBR/fq; the
+            # tree already keeps tcp_ecn_fallback=1 so broken paths degrade safely)
+            sed -i 's/net->ipv4\.sysctl_tcp_ecn = 2;/net->ipv4.sysctl_tcp_ecn = 1;/' "$TCP_SRC"
+            # TFO: client-only -> client + server (bit0|bit1 = 3)
+            sed -i 's/net->ipv4\.sysctl_tcp_fastopen = TFO_CLIENT_ENABLE;/net->ipv4.sysctl_tcp_fastopen = TFO_CLIENT_ENABLE | TFO_SERVER_ENABLE;/' "$TCP_SRC"
+            # Do not collapse cwnd after idle on mobile links (RFC2861 off); the
+            # radio's own idle timer already gates this.
+            sed -i 's|net->ipv4\.sysctl_tcp_slow_start_after_idle = 1; /\* By default, RFC2861 behavior\.  \*/|net->ipv4.sysctl_tcp_slow_start_after_idle = 0; /* mobile: keep cwnd across idle */|' "$TCP_SRC"
+            # PMTU blackhole detection (0 -> 1 = probe only after ICMP blackhole)
+            if grep -q "net->ipv4\.sysctl_tcp_mtu_probing = " "$TCP_SRC"; then
+              sed -i 's/net->ipv4\.sysctl_tcp_mtu_probing = [0-9];/net->ipv4.sysctl_tcp_mtu_probing = 1;/' "$TCP_SRC"
+            else
+              sed -i 's/\(net->ipv4\.sysctl_tcp_ecn_fallback = 1;\)/\1\n\tnet->ipv4.sysctl_tcp_mtu_probing = 1;/' "$TCP_SRC"
+            fi
+            # RFC1337 TIME-WAIT assassination protection (0 -> 1)
+            if grep -q "net->ipv4\.sysctl_tcp_rfc1337 = " "$TCP_SRC"; then
+              sed -i 's/net->ipv4\.sysctl_tcp_rfc1337 = [0-9];/net->ipv4.sysctl_tcp_rfc1337 = 1;/' "$TCP_SRC"
+            else
+              sed -i 's/\(net->ipv4\.sysctl_tcp_ecn_fallback = 1;\)/\1\n\tnet->ipv4.sysctl_tcp_rfc1337 = 1;/' "$TCP_SRC"
+            fi
+            # Lower notsent_lowat (UINT_MAX -> 128 KiB) to cut bufferbloat / HoL on
+            # interactive flows; recommended alongside BBR by the BBR authors.
+            sed -i 's/net->ipv4\.sysctl_tcp_notsent_lowat = UINT_MAX;/net->ipv4.sysctl_tcp_notsent_lowat = 131072;/' "$TCP_SRC"
+            # Keepalive: 2h -> 5min so NAT/carrier-CGN mappings do not silently die
+            sed -i 's/net->ipv4\.sysctl_tcp_keepalive_time = TCP_KEEPALIVE_TIME;/net->ipv4.sysctl_tcp_keepalive_time = 5*60*HZ;/' "$TCP_SRC"
+            # FIN_WAIT2 timeout: 60s -> 30s (faster socket reclaim on flaky radios)
+            sed -i 's/net->ipv4\.sysctl_tcp_fin_timeout = TCP_FIN_TIMEOUT;/net->ipv4.sysctl_tcp_fin_timeout = 30*HZ;/' "$TCP_SRC"
+          else
+            echo "::warning::$TCP_SRC not found - skipping TCP sysctl default tuning"
+          fi
+          if [ -f "$DEV_SRC" ]; then
+            # Softirq backlog for high-throughput Wi-Fi 6/6E + 5G: 1000 -> 2500,
+            # NAPI budget 300 -> 600 packets per poll.
+            sed -i 's/^int netdev_max_backlog __read_mostly = 1000;/int netdev_max_backlog __read_mostly = 2500;/' "$DEV_SRC"
+            sed -i 's/^int netdev_budget __read_mostly = 300;/int netdev_budget __read_mostly = 600;/' "$DEV_SRC"
+          else
+            echo "::warning::$DEV_SRC not found - skipping netdev backlog tuning"
+          fi
+
+          echo "=== Network sysctl default audit (source-level) ==="
+          grep -nE "sysctl_tcp_ecn = |sysctl_tcp_fastopen = |slow_start_after_idle = |sysctl_tcp_mtu_probing = |sysctl_tcp_rfc1337 = |sysctl_tcp_notsent_lowat = |sysctl_tcp_keepalive_time = |sysctl_tcp_fin_timeout = " "$TCP_SRC" || true
+          grep -nE "^int netdev_max_backlog|^int netdev_budget " "$DEV_SRC" || true
+
+          echo "=== Injected defconfig tail (audit) ==="
+          grep -nE "CONFIG_KPM|CONFIG_TCP_CONG|CONFIG_DEFAULT_BBR|CONFIG_DEFAULT_TCP_CONG|CONFIG_NET_SCH_FQ|CONFIG_NET_SCH_CAKE|CONFIG_NET_SCH_DEFAULT|CONFIG_DEFAULT_FQ|CONFIG_DEVFREQ_GOV|CONFIG_ZRAM|CONFIG_CRYPTO_LZ4|CONFIG_UCLAMP|CONFIG_MQ_IOSCHED_KYBER|CONFIG_LTO_CLANG|CONFIG_SLUB_DEBUG|CONFIG_NTSYNC" "$CONFIG_FILE" || true
 
       - name: Build kernel
         if: ${{ github.event.inputs.CPU == 'sm8650' || github.event.inputs.CPU == 'sm7675' }}
         run: |
+          # STEP 2: GitHub Actions' default `bash -e {0}` does NOT enable pipefail.
+          # Without it `... 2>&1 | tee build.log` returns tee's exit code (0) and
+          # the job reports success on a dead build. Make the pipeline fail through.
+          set -o pipefail
           cd kernel_workspace
-          ./kernel_platform/build_with_bazel.py -t ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
-          
+          ./kernel_platform/build_with_bazel.py -t ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }} 2>&1 | tee build.log
+
       - name: Fallback build kernel
         if: ${{ github.event.inputs.CPU != 'sm8650' && github.event.inputs.CPU != 'sm7675' }}
         run: |
-         cd kernel_workspace
-         LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
+          # STEP 2: GitHub Actions' default `bash -e {0}` does NOT enable pipefail.
+          # Without it `... 2>&1 | tee build.log` returns tee's exit code (0) and
+          # the job reports success on a dead build. Make the pipeline fail through.
+          set -o pipefail
+          cd kernel_workspace
+          LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }} 2>&1 | tee build.log
+
+          # oplus_build_kernel.sh's interactive menu swallows non-zero exit codes in
+          # some paths (the failed run above logged 'make ... Error 2' and still
+          # printed the 'build total time' banner). Fail explicitly on compiler errors
+          # so a dead build never reaches packaging:
+          if grep -qE "^(source/)?[A-Za-z0-9_./-]+\.[ch]:[0-9]+:[0-9]+: error:|\*\*\* \[.*\] Error [0-9]+" build.log; then
+            echo "::error::Kernel compilation errors detected in build.log — failing the job."
+            grep -nE "error:|\*\*\* \[.*\] Error [0-9]+" build.log | head -n 40
+            exit 1
+          fi
 
       - name: Make AnyKernel3
         run: |
           git clone https://github.com/Numbersf/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
 
-          dir1="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/dist/"
-          dir2="kernel_workspace/kernel_platform/bazel-out/k8-fastbuild/bin/msm-kernel/${{ github.event.inputs.CPUD }}_gki_kbuild_mixed_tree/"
-          dir3="kernel_workspace/kernel_platform/out/msm-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/dist/"
-          dir4="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/gki_kernel/common/arch/arm64/boot/"
-          dir5="kernel_workspace/kernel_platform/out/msm-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/gki_kernel/common/arch/arm64/boot/"
-          target1="./AnyKernel3/"
-          target2="./kernel_workspace/kernel"
+          # Teach the flasher about the bundled runtime perf-tuner module (installed
+          # via ksud after the kernel is written; skipped silently if ksud is absent
+          # or the zip is missing). Appended, so upstream anykernel.sh changes still apply.
+          if ! grep -q "oneplus_perf_tuner.zip" ./AnyKernel3/anykernel.sh; then
+            cat >> ./AnyKernel3/anykernel.sh <<'EOF'
 
-          # 查找 Image 文件
-          if find "$dir1" -name "Image" | grep -q "Image"; then
-            image_path="$dir1"Image
-          elif find "$dir2" -name "Image" | grep -q "Image"; then
-            image_path="$dir2"Image
-          elif find "$dir3" -name "Image" | grep -q "Image"; then
-            image_path="$dir3"Image
-          elif find "$dir4" -name "Image" | grep -q "Image"; then
-            image_path="$dir4"Image
-          elif find "$dir5" -name "Image" | grep -q "Image"; then
-            image_path="$dir5"Image
-          else
-            image_path=$(find "./kernel_workspace/kernel_platform/common/out/" -name "Image" | head -n 1)
+          # =============
+          # Perf tuner module (CI-bundled)
+          # =============
+          if [ -f "$AKHOME/oneplus_perf_tuner.zip" ]; then
+            if [ -f /data/adb/ksud ]; then
+              ui_print " Installing OnePlus Perf Tuner module (network/GPU/sched/IO tuning)..."
+              /data/adb/ksud module install "$AKHOME/oneplus_perf_tuner.zip" && ui_print " Perf Tuner installed." || ui_print " Perf Tuner install failed (non-fatal)."
+            else
+              ui_print " KSUD not found - skipping Perf Tuner module."
+            fi
+          fi
+          EOF
           fi
 
-          # 拷贝 Image
-          if [ -n "$image_path" ] && [ -f "$image_path" ]; then
-            mkdir -p "$dir1"
-            if [ "$(realpath "$image_path")" != "$(realpath "$dir1"Image)" ]; then
-              cp "$image_path" "$dir1"
-            else
-              echo "源文件与目标相同，跳过复制"
-            fi
-            cp "$dir1"Image ./AnyKernel3/Image
+          # STEP 5: dynamic Image discovery. Never hardcode an out-dir path: the
+          # oplus build script silently remaps unknown CPUD values (e.g. crow ->
+          # "auto select platform kalama"), so out/msm-kernel-<CPUD>-<method> may
+          # not exist even after a successful build.
+          IMAGE_SRC=""
+          # Tier 1: bazel/kleaf dist directories (the normal oplus kernel_platform layout)
+          IMAGE_SRC=$(find kernel_workspace/kernel_platform/out -type f -name Image -path "*dist*" 2>/dev/null | head -n 1)
+          # Tier 2: anywhere under the kernel_platform out/ tree
+          if [ -z "$IMAGE_SRC" ]; then
+            IMAGE_SRC=$(find kernel_workspace/kernel_platform/out -type f -name Image 2>/dev/null | head -n 1)
+          fi
+          # Tier 3: classic OBJ layout anywhere in the workspace
+          if [ -z "$IMAGE_SRC" ]; then
+            IMAGE_SRC=$(find kernel_workspace -type f -name Image -path "*arm64/boot*" 2>/dev/null | head -n 1)
+          fi
+
+          if [ -n "$IMAGE_SRC" ] && [ -s "$IMAGE_SRC" ]; then
+            cp "$IMAGE_SRC" ./AnyKernel3/Image
+            echo "Successfully found and copied kernel Image from: $IMAGE_SRC ($(du -h "$IMAGE_SRC" | cut -f1))"
           else
-            echo "未找到 Image 文件，构建可能失败"
+            echo "ERROR: Kernel Image binary not found in any out/ tree! Failing the job instead of shipping an empty zip."
             exit 1
           fi
+
+          # Export the discovered dist directory for later steps (KPM patch_linux, audit)
+          DIST_DIR="$(dirname "$IMAGE_SRC")"
+          echo "IMAGE_SRC=$IMAGE_SRC" >> $GITHUB_ENV
+          echo "DIST_DIR=$DIST_DIR" >> $GITHUB_ENV
 
           # 可选复制其它新文件（如果存在）
           if [ "${{ github.event.inputs.CPU }}" = "sm8750" ] || [ "${{ github.event.inputs.CPU }}" = "sm8850" ]; then
           for file in dtbo.img system_dlkm.erofs.img vendor_dlkm.img vendor_boot.img; do
-            if [ -f "$dir1$file" ]; then
+            if [ -f "$DIST_DIR/$file" ]; then
               target_name="$file"
               # 特殊处理 system_dlkm.erofs.img 的目标名
               if [ "$file" = "system_dlkm.erofs.img" ]; then
                 target_name="system_dlkm.img"
               fi
-              cp "$dir1$file" "./AnyKernel3/$target_name"
+              cp "$DIST_DIR/$file" "./AnyKernel3/$target_name"
             else
               echo "$file 不存在，跳过复制"
             fi
@@ -387,40 +800,296 @@ jobs:
       - name: Apply patch_linux and replace Image
         if: ${{ github.event.inputs.KPM == 'true' }}
         run: |
-          cd /home/runner/work/Action_OnePlus_MKSU_SUSFS/Action_OnePlus_MKSU_SUSFS/kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/dist
+          # Use the dist directory discovered dynamically in "Make AnyKernel3"
+          # (no hardcoded kalama/crow path, no hardcoded runner workspace path).
+          if [ -z "$DIST_DIR" ] || [ ! -f "$DIST_DIR/Image" ]; then
+            echo "ERROR: DIST_DIR not set or Image missing (DIST_DIR='$DIST_DIR')"
+            exit 1
+          fi
+          cd "$DIST_DIR"
 
           curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch_linux
           chmod +x patch_linux
           ./patch_linux
+          if [ ! -s oImage ]; then
+            echo "ERROR: patch_linux did not produce oImage"
+            exit 1
+          fi
           rm -f Image
           mv oImage Image
           cp Image $GITHUB_WORKSPACE/AnyKernel3/Image
+          echo "KPM-patched Image installed ($(du -h Image | cut -f1))"
 
       # 下载 SUSFS 模块（CI）
-      - name: Download Latest SUSFS Module from CI
-        if: ${{ github.event.inputs.SUSFS_CI == 'true' }}
+      - name: Download SUSFS Module (CI with Release fallback)
         run: |
-          LATEST_RUN_ID=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success" | \
-            jq -r '.workflow_runs[] | select(.head_branch == "v1.5.2+") | .id' | head -n 1)
+          set -o pipefail
+          # STEP 6: one canonical filename for the CI artifact AND the release
+          # asset. The AnyKernel3 flasher (Numbersf/AnyKernel3 anykernel.sh)
+          # looks for ksu_module_susfs_1.5.2+_CI.zip / _Release.zip, so we ship
+          # the canonical name plus the exact name the flasher expects.
+          OUT=ksu_module_susfs.zip
+          FLASHER_NAME=""
+          rm -f "$OUT"
 
-          if [ -z "$LATEST_RUN_ID" ]; then
-            echo "No successful run found for branch v1.5.2+"
-            exit 1
+          if [ "${{ github.event.inputs.SUSFS_CI }}" = "true" ]; then
+            echo "Trying latest CI artifact from sidex15/susfs4ksu-module (branch v1.5.2+)..."
+            LATEST_RUN_ID=$(curl -fsS -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success&per_page=30" | \
+              jq -r '.workflow_runs[] | select(.head_branch == "v1.5.2+") | .id' | head -n 1 || true)
+            if [ -n "$LATEST_RUN_ID" ]; then
+              ARTIFACT_URL=$(curl -fsS -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" | \
+                jq -r '.artifacts[] | select(.expired == false) | .archive_download_url' | head -n 1 || true)
+              if [ -n "$ARTIFACT_URL" ] && [ "$ARTIFACT_URL" != "null" ]; then
+                # GITHUB_TOKEN is repo-scoped; cross-repo artifact download may 403.
+                curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o "$OUT" "$ARTIFACT_URL" || rm -f "$OUT"
+              fi
+            fi
+            if [ -s "$OUT" ] && unzip -tq "$OUT" >/dev/null 2>&1 && unzip -p "$OUT" module.prop >/dev/null 2>&1; then
+              echo "CI artifact OK (run $LATEST_RUN_ID)"; FLASHER_NAME="ksu_module_susfs_1.5.2+_CI.zip"
+            else
+              echo "::warning::CI artifact unavailable or invalid - falling back to GitHub Release"
+              rm -f "$OUT"
+            fi
           fi
 
-          ARTIFACT_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" | jq -r '.artifacts[0].archive_download_url')
+          if [ ! -s "$OUT" ]; then
+            echo "Downloading latest release from sidex15/ksu_module_susfs..."
+            curl -fsSL -o "$OUT" "https://github.com/sidex15/ksu_module_susfs/releases/latest/download/ksu_module_susfs_1.5.2+.zip"
+            unzip -tq "$OUT" >/dev/null && unzip -p "$OUT" module.prop >/dev/null || { echo "::error::Release zip invalid"; exit 1; }
+            FLASHER_NAME="ksu_module_susfs_1.5.2+_Release.zip"
+          fi
 
-          curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o ksu_module_susfs.zip "$ARTIFACT_URL"
-          cp ksu_module_susfs.zip ./AnyKernel3/
+          cp "$OUT" ./AnyKernel3/"$OUT"
+          cp "$OUT" ./AnyKernel3/"$FLASHER_NAME"
+          echo "SUSFS module shipped as: $OUT and $FLASHER_NAME ($(du -h "$OUT" | cut -f1))"
 
-      # 下载 SUSFS 模块（Release）
-      - name: Download Latest SUSFS Module from Release
-        if: ${{ github.event.inputs.SUSFS_CI == 'false' }}
+      # Runtime tuner: the parts of "network / GPU / scheduler tuning" that live in
+      # vendor modules (WALT cpufreq, KGSL devfreq, thermal) or are sysctl-only cannot
+      # be baked into a GKI Image without breaking the KMI. Ship them as a KernelSU
+      # module that applies at boot. Every write is guarded by "node exists", so it is
+      # safe on any ROM/firmware; values are the conservative-fast set for SM7550.
+      - name: Build runtime tuner module
         run: |
-          wget https://github.com/sidex15/ksu_module_susfs/releases/latest/download/ksu_module_susfs_1.5.2+.zip
-          cp ksu_module_susfs_1.5.2+.zip ./AnyKernel3/
+          set -o pipefail
+          M=perf_tuner_module
+          rm -rf "$M" && mkdir -p "$M/META-INF/com/google/android"
+          cat > "$M/module.prop" <<'EOF'
+          id=oneplus_perf_tuner
+          name=OnePlus Nord CE4 Perf Tuner (Kernel companion)
+          version=v1.0
+          versionCode=1
+          author=Action_OnePlus_MKSU_SUSFS CI
+          description=Boot-time network/GPU/scheduler/IO tuning matching the BBR+FQ SukiSU kernel. Safe: every knob is guarded.
+          EOF
+          # KernelSU/Magisk module installer stubs
+          printf '#MAGISK\n' > "$M/META-INF/com/google/android/updater-script"
+          cat > "$M/META-INF/com/google/android/update-binary" <<'EOF'
+          #!/sbin/sh
+          umask 022
+          ui_print() { echo "$1"; }
+          require_new_magisk() { ui_print "*******************************"; ui_print " Please install Magisk/KernelSU "; ui_print "*******************************"; exit 1; }
+          OUTFD=$2
+          ZIPFILE=$3
+          mount /data 2>/dev/null
+          [ -f /data/adb/magisk/util_functions.sh ] || require_new_magisk
+          . /data/adb/magisk/util_functions.sh
+          install_module
+          exit 0
+          EOF
+          cat > "$M/service.sh" <<'EOF'
+          #!/system/bin/sh
+          # Runs in late_start service mode. Waits for boot to finish so vendor
+          # init/perfd have already written their defaults; ours win.
+          MODDIR=${0%/*}
+          LOG=/data/adb/perf_tuner.log
+          w() { [ -e "$1" ] && [ -w "$1" ] && echo "$2" > "$1" 2>/dev/null && echo "OK  $1 = $2" >> "$LOG" || echo "SKIP $1" >> "$LOG"; }
+          until [ "$(getprop sys.boot_completed)" = "1" ]; do sleep 2; done
+          sleep 15
+          : > "$LOG"; echo "perf_tuner start $(date)" >> "$LOG"
+
+          ## ---- Network (kernel already defaults BBR/fq/ECN; these are the rest) ----
+          w /proc/sys/net/ipv4/tcp_congestion_control bbr
+          w /proc/sys/net/core/default_qdisc fq
+          w /proc/sys/net/ipv4/tcp_ecn 1
+          w /proc/sys/net/ipv4/tcp_fastopen 3
+          w /proc/sys/net/ipv4/tcp_slow_start_after_idle 0
+          w /proc/sys/net/ipv4/tcp_mtu_probing 1
+          w /proc/sys/net/ipv4/tcp_rfc1337 1
+          w /proc/sys/net/ipv4/tcp_notsent_lowat 131072
+          w /proc/sys/net/ipv4/tcp_no_metrics_save 1
+          w /proc/sys/net/ipv4/tcp_timestamps 1
+          w /proc/sys/net/ipv4/tcp_sack 1
+          w /proc/sys/net/ipv4/tcp_window_scaling 1
+          w /proc/sys/net/ipv4/tcp_low_latency 1
+          w /proc/sys/net/ipv4/tcp_keepalive_time 300
+          w /proc/sys/net/ipv4/tcp_keepalive_intvl 30
+          w /proc/sys/net/ipv4/tcp_keepalive_probes 5
+          w /proc/sys/net/ipv4/tcp_fin_timeout 30
+          w /proc/sys/net/ipv4/tcp_tw_reuse 1
+          w /proc/sys/net/ipv4/tcp_syncookies 1
+          w /proc/sys/net/ipv4/tcp_rmem "4096 1048576 16777216"
+          w /proc/sys/net/ipv4/tcp_wmem "4096 262144 16777216"
+          w /proc/sys/net/ipv4/udp_rmem_min 16384
+          w /proc/sys/net/ipv4/udp_wmem_min 16384
+          w /proc/sys/net/core/rmem_max 16777216
+          w /proc/sys/net/core/wmem_max 16777216
+          w /proc/sys/net/core/rmem_default 262144
+          w /proc/sys/net/core/wmem_default 262144
+          w /proc/sys/net/core/netdev_max_backlog 2500
+          w /proc/sys/net/core/netdev_budget 600
+          w /proc/sys/net/core/somaxconn 1024
+          w /proc/sys/net/ipv4/ip_local_port_range "16384 65535"
+          w /proc/sys/net/ipv6/conf/all/use_tempaddr 2
+          w /proc/sys/net/ipv6/conf/default/use_tempaddr 2
+
+          ## ---- GPU: Adreno 720 (KGSL, vendor module) ----
+          G=/sys/class/kgsl/kgsl-3d0
+          if [ -d "$G" ]; then
+            w $G/devfreq/governor msm-adreno-tz
+            w $G/throttling 0
+            w $G/force_no_nap 0
+            w $G/bus_split 1
+            w $G/force_bus_on 0
+            w $G/force_rail_on 0
+            w $G/force_clk_on 0
+            w $G/idle_timer 80
+            # Let the GPU reach its top bin under load; min stays at the lowest bin.
+            MAX=$(cat $G/max_gpuclk 2>/dev/null); [ -n "$MAX" ] && w $G/devfreq/max_freq "$MAX"
+            w $G/max_pwrlevel 0
+            w $G/default_pwrlevel $(cat $G/num_pwrlevels 2>/dev/null | awk '{print $1-1}')
+          fi
+
+          ## ---- CPU: WALT/schedutil (vendor governor); keep boost responsive ----
+          for P in /sys/devices/system/cpu/cpufreq/policy*; do
+            [ -d "$P" ] || continue
+            GOV=$(cat $P/scaling_governor 2>/dev/null)
+            case "$GOV" in
+              walt)
+                w $P/walt/hispeed_load 85
+                w $P/walt/pl 1
+                w $P/walt/rtg_boost_freq 0
+                w $P/walt/adaptive_low_freq 0 ;;
+              schedutil)
+                w $P/schedutil/rate_limit_us 500
+                w $P/schedutil/up_rate_limit_us 500
+                w $P/schedutil/down_rate_limit_us 5000 ;;
+            esac
+          done
+          # WALT scheduler tunables (sm7550: prime/gold/silver clusters)
+          W=/proc/sys/walt
+          if [ -d "$W" ]; then
+            w $W/sched_boost 0
+            w $W/sched_group_upmigrate 95
+            w $W/sched_group_downmigrate 85
+            w $W/sched_min_task_util_for_boost 51
+            w $W/sched_min_task_util_for_colocation 35
+            w $W/sched_many_wakeup_threshold 1000
+            w $W/sched_conservative_pl 0
+          fi
+          # Generic CFS/uclamp knobs present in GKI 5.15
+          w /proc/sys/kernel/sched_util_clamp_min_rt_default 0
+          w /proc/sys/kernel/sched_util_clamp_min 1024
+          w /proc/sys/kernel/sched_util_clamp_max 1024
+          w /proc/sys/kernel/sched_autogroup_enabled 0
+          w /proc/sys/kernel/perf_cpu_time_max_percent 5
+          w /proc/sys/kernel/sched_schedstats 0
+          w /proc/sys/kernel/printk "3 3 1 3"
+          w /sys/kernel/debug/sched/latency_ns 4000000 2>/dev/null
+          w /sys/kernel/debug/sched/min_granularity_ns 500000 2>/dev/null
+          w /sys/kernel/debug/sched/wakeup_granularity_ns 1000000 2>/dev/null
+          w /sys/kernel/debug/sched/migration_cost_ns 500000 2>/dev/null
+
+          ## ---- Memory: MGLRU + zram + reclaim ----
+          w /sys/kernel/mm/lru_gen/enabled 0x0007
+          w /sys/kernel/mm/lru_gen/min_ttl_ms 1000
+          w /proc/sys/vm/swappiness 100
+          w /proc/sys/vm/vfs_cache_pressure 50
+          w /proc/sys/vm/dirty_ratio 30
+          w /proc/sys/vm/dirty_background_ratio 10
+          w /proc/sys/vm/dirty_expire_centisecs 3000
+          w /proc/sys/vm/dirty_writeback_centisecs 1500
+          w /proc/sys/vm/page-cluster 0
+          w /proc/sys/vm/extra_free_kbytes 32768
+          w /proc/sys/vm/watermark_scale_factor 125
+          w /proc/sys/vm/stat_interval 10
+          w /proc/sys/vm/compaction_proactiveness 0
+          w /sys/kernel/mm/transparent_hugepage/enabled madvise
+          w /sys/kernel/mm/transparent_hugepage/defrag never
+          w /sys/kernel/mm/transparent_hugepage/khugepaged/defrag 0
+          w /sys/module/zram/parameters/compressor lz4kd 2>/dev/null
+
+          ## ---- Storage: UFS 3.1 (sda..sdf + dm) ----
+          for B in /sys/block/sd* /sys/block/dm-*; do
+            [ -d "$B/queue" ] || continue
+            case "$B" in
+              */sd*)
+                if grep -qw kyber $B/queue/scheduler 2>/dev/null; then w $B/queue/scheduler kyber
+                elif grep -qw mq-deadline $B/queue/scheduler 2>/dev/null; then w $B/queue/scheduler mq-deadline; fi
+                w $B/queue/read_ahead_kb 256
+                w $B/queue/nr_requests 128
+                w $B/queue/iostats 0
+                w $B/queue/add_random 0
+                w $B/queue/rq_affinity 2
+                w $B/queue/nomerges 0
+                w $B/queue/wbt_lat_usec 2000 ;;
+              */dm-*)
+                w $B/queue/read_ahead_kb 128
+                w $B/queue/iostats 0
+                w $B/queue/add_random 0 ;;
+            esac
+          done
+          w /proc/sys/fs/file-max 524288
+          w /proc/sys/fs/inotify/max_user_watches 524288
+
+          ## ---- Wi-Fi / IRQ locality ----
+          w /proc/irq/default_smp_affinity f0
+          echo "perf_tuner done $(date)" >> "$LOG"
+          EOF
+          cat > "$M/post-fs-data.sh" <<'EOF'
+          #!/system/bin/sh
+          # Early phase: nothing to do; keep file so KSU treats module as scripted.
+          exit 0
+          EOF
+          cat > "$M/uninstall.sh" <<'EOF'
+          #!/system/bin/sh
+          rm -f /data/adb/perf_tuner.log
+          EOF
+          cat > "$M/customize.sh" <<'EOF'
+          #!/system/bin/sh
+          ui_print "- OnePlus Nord CE4 Perf Tuner"
+          ui_print "- Applies BBR/fq/ECN network, Adreno-720 KGSL, WALT/uclamp, MGLRU, UFS I/O tuning at boot"
+          ui_print "- Log: /data/adb/perf_tuner.log"
+          set_perm_recursive $MODPATH 0 0 0755 0755
+          EOF
+          chmod 0755 "$M"/*.sh "$M/META-INF/com/google/android/update-binary"
+          (cd "$M" && zip -qr9 ../oneplus_perf_tuner.zip .)
+          unzip -tq oneplus_perf_tuner.zip >/dev/null && unzip -p oneplus_perf_tuner.zip module.prop >/dev/null
+          cp oneplus_perf_tuner.zip ./AnyKernel3/
+          echo "runtime tuner module: $(du -h oneplus_perf_tuner.zip | cut -f1)"
+          sh -n "$M/service.sh" && echo "service.sh syntax OK"
+
+      # STEP 7: post-build verification of the config the build actually consumed
+      - name: Verify applied kernel config
+        run: |
+          OUT_CONFIG=$(find kernel_workspace/kernel_platform/out -name ".config" -path "*msm-kernel*" 2>/dev/null | head -n 1)
+          if [ -z "$OUT_CONFIG" ]; then
+            OUT_CONFIG=$(find kernel_workspace/kernel_platform/out -name ".config" 2>/dev/null | head -n 1)
+          fi
+          if [ -n "$OUT_CONFIG" ]; then
+            echo "Auditing: $OUT_CONFIG"
+            echo "=== Applied config audit ==="
+            grep -E "CONFIG_TCP_CONG_BBR|CONFIG_DEFAULT_BBR|CONFIG_DEFAULT_TCP_CONG|CONFIG_NET_SCH_FQ|CONFIG_DEFAULT_NET_SCH|CONFIG_ZRAM_DEF_COMP|CONFIG_UCLAMP_TASK|CONFIG_MQ_IOSCHED_KYBER|CONFIG_LTO_CLANG|CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND|CONFIG_SLUB_DEBUG" "$OUT_CONFIG" || true
+            echo "=== KSU / SUSFS state ==="
+            grep -E "^CONFIG_KSU" "$OUT_CONFIG" || echo "WARNING: no CONFIG_KSU symbols in .config"
+            echo "=== KPM state ==="
+            grep -E "CONFIG_KPM" "$OUT_CONFIG" || echo "KPM not enabled (input off or symbol absent)"
+          else
+            echo "No .config found under kernel_platform/out — skipping audit"
+          fi
+          echo "=== AnyKernel3 payload ==="
+          ls -la ./AnyKernel3/
 
       - name: Set suffix
         id: suffix
